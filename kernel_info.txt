@@ -1,0 +1,1 @@
+Linux archlinux 6.12.33-1-lts #1 SMP PREEMPT_DYNAMIC Tue, 10 Jun 2025 13:16:59 +0000 x86_64 GNU/Linux

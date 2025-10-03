@@ -1,0 +1,44 @@
+Name            : libfprint-tod
+Version         : 1.94.9+tod1-1
+Description     : Library for fingerprint readers - TOD version
+Architecture    : x86_64
+URL             : https://fprint.freedesktop.org/
+Licenses        : LGPL-2.1-or-later
+Groups          : fprint
+Provides        : libfprint  libfprint-tod  libfprint-2.so=2-64  libfprint-2-tod.so=1-64
+Depends On      : gcc-libs  glib2  glibc  libgudev  libgusb  nss  pixman
+Optional Deps   : None
+Required By     : fprintd
+Optional For    : None
+Conflicts With  : libfprint
+Replaces        : None
+Installed Size  : 25.90 MiB
+Packager        : Unknown Packager
+Build Date      : Sat 03 May 2025 09:12:42 PM EDT
+Install Date    : Sat 03 May 2025 09:13:40 PM EDT
+Install Reason  : Explicitly installed
+Install Script  : No
+Validated By    : None
+
+Name            : fprintd
+Version         : 1.94.5-1
+Description     : D-Bus service to access fingerprint readers
+Architecture    : x86_64
+URL             : https://fprint.freedesktop.org/
+Licenses        : GPL-2.0-or-later
+Groups          : fprint
+Provides        : None
+Depends On      : dbus  gcc-libs  glib2  glibc  libfprint  pam  polkit  systemd  systemd-libs  libfprint-2.so=2-64
+Optional Deps   : None
+Required By     : None
+Optional For    : None
+Conflicts With  : None
+Replaces        : None
+Installed Size  : 913.69 KiB
+Packager        : Jan Alexander Steffens (heftig) <heftig@archlinux.org>
+Build Date      : Sat 22 Feb 2025 10:43:54 PM EST
+Install Date    : Sat 03 May 2025 08:48:49 PM EDT
+Install Reason  : Explicitly installed
+Install Script  : No
+Validated By    : Signature
+

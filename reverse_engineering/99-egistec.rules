@@ -1,0 +1,3 @@
+# EgisTec EH576 Fingerprint Scanner
+# This rule grants access to the EgisTec fingerprint device for users in the plugdev group
+SUBSYSTEM=="usb", ATTR{idVendor}=="1c7a", ATTR{idProduct}=="0576", MODE="0666", GROUP="plugdev"

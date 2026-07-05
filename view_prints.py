@@ -4,8 +4,8 @@ from PIL import Image
 # Sensor dimensions we extracted from Marcel's C header
 WIDTH = 70
 HEIGHT = 57
-INPUT_DIR = "raw_fingerprints"
-OUTPUT_DIR = "png_fingerprints"
+INPUT_DIR = "background_noise"
+OUTPUT_DIR = "background_png"
 
 def convert_bin_to_png():
     if not os.path.exists(INPUT_DIR):

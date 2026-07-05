@@ -65,7 +65,7 @@ def setup_environment():
         os.makedirs(DATASET_DIR)
         log(f"Created dataset directory: {DATASET_DIR}/")
 
-def run_harvest(target_count=100):
+def run_harvest(target_count=10):
     log("start")
     
     dev = usb.core.find(idVendor=VID, idProduct=PID) #find egis sensor
@@ -129,7 +129,7 @@ def run_harvest(target_count=100):
                         variance = statistics.pvariance(img_data)
                         log(f"\ndetected finger (Variance: {variance:.2f})")
                         
-                        filename = f"{DATASET_DIR}/finger_{capture_count + 1:03d}.bin"
+                        filename = f"{DATASET_DIR}/left_pink_{capture_count + 1:03d}.bin"
                         with open(filename, "wb") as f:
                             f.write(img_data)
                         
@@ -151,4 +151,4 @@ def run_harvest(target_count=100):
 
 if __name__ == "__main__":
     setup_environment()
-    run_harvest(target_count=100)
+    run_harvest(target_count=10)

@@ -1,3 +1,7 @@
 /png_fingerprints
 /raw_fingerprints
 training_model/scoofing_data
+
+/testing_fingerprints
+/background_png
+/__pycache__

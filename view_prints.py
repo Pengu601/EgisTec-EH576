@@ -4,7 +4,7 @@ from PIL import Image
 # Sensor dimensions we extracted from Marcel's C header
 WIDTH = 70
 HEIGHT = 57
-INPUT_DIR = "D:\\GitHub Projects\\EgisTec-EH576\\training_model\\scoofing_data\\raw_fingerprints"
+INPUT_DIR = "testing_fingerprints"
 OUTPUT_DIR = "png_fingerprints"
 
 def convert_bin_to_png():

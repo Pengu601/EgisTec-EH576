@@ -1,10 +1,18 @@
 # libfprint driver for the EgisTec EH576 (1c7a:0576)
 
-A working **libfprint driver** for the EH576, written in C against current
-libfprint master and validated end-to-end on real hardware (Lenovo Yoga 7
-16IRL8): device init, finger detection, capture, 8-stage enrollment, and
-verification all function through the standard libfprint API
-(`examples/enroll`, `examples/verify`).
+A **libfprint driver** for the EH576, written in C against current libfprint
+master and validated end-to-end on real hardware (Lenovo Yoga 7 16IRL8):
+device init, finger detection, capture, 8-stage enrollment, and verification
+all run through the standard libfprint API (`examples/enroll`,
+`examples/verify`).
+
+**Status: the protocol and capture side work; matching does not yet.** The
+driver reliably produces clean fingerprint images and completes enrollment and
+verification flows, but the correlation matcher's genuine and impostor scores
+overlap, so it cannot yet be trusted to tell fingers apart — see "Matching
+does not currently work reliably" below for the measurements and for what
+needs to change. Use it as a working capture/protocol foundation and a
+matching problem to attack, not as a drop-in authentication device.
 
 The protocol layer is built directly on this project's findings (INIT/REPEAT
 sequences, variance-based finger detection, the gain register) plus the vendor
@@ -56,23 +64,63 @@ structure ("skeletons") on the host. This driver does the same: it is a plain
   coherence, from the vendor's `qty` metric), and scores translation-searched
   normalized cross-correlation against each enrolled frame, best-of-8.
 
-On-device numbers (one unit, one user): genuine presses score 0.47-0.89,
-different-angle impostor fingers 0.11-0.21, threshold 0.28.
+## Matching does not currently work reliably — read this before trusting it
 
-## Known limitation (honest disclosure)
+**The correlation matcher does not separate genuine presses from impostors on
+this sensor.** This is measured, not suspected, and it is the honest headline:
+the capture side of this driver is solid, the matching side is an open problem.
 
-**A finger whose ridge angle coincides with the enrolled prints can false
-accept** (observed: same hand's thumb scoring 0.34-0.70 against index
-templates). On a patch this small, most ridges are near-parallel, so global
-correlation partly measures ridge *orientation and spacing* rather than ridge
-*identity*. Multi-template consensus, peak-to-sidelobe ratio, and local-tile
-agreement were all tried and do **not** separate this case.
+Numbers from a controlled run (one unit, one user, every press explicitly
+prompted and labeled at press time — see "Evaluation harness" below): 8
+enrolled right-index templates, then 5 probes each of right index (genuine),
+right thumb, and left index (impostors), scored best-of-8:
 
-Treat this as convenience-grade matching for now. The most promising paths:
-mosaic-stitching the enrolled frames into a larger template (possibly enough
-to hand back to NBIS), or a real minutiae+orientation-field matcher.
-Contributions welcome — the matcher is deliberately isolated in
-`egis_match.c` behind a tiny interface (`em_frame_compute` / `em_match`).
+| probe | scores |
+|---|---|
+| genuine (right index) | 0.350, 0.392, 0.451, 0.798, 0.981 |
+| impostor (right thumb) | 0.275, 0.295, 0.338, 0.353, 0.364 |
+| impostor (left index) | 0.272, 0.281, 0.374, 0.447, 0.456 |
+
+The worst genuine press (0.350) scores **below** the best impostor (0.456), so
+no threshold classifies this set correctly — the margin is -0.106. Genuine
+scores also swing enormously with placement (0.35 to 0.98 on the same finger).
+
+Why: on a 70x57 patch almost all ridges are near-parallel, so global
+correlation largely measures ridge *orientation and spacing*, which any two
+fingertips share when pressed at a similar angle. The identity information —
+ridge endings and bifurcations, and how they're arranged — is exactly what
+correlation discards.
+
+Approaches tried that do **not** fix it (don't spend time re-deriving these):
+multi-template consensus, peak-to-sidelobe ratio of the correlation surface,
+local-tile agreement, and top-3 score fusion. All produce overlapping genuine
+and impostor distributions. **The feature has to change, not the score
+fusion.** The two promising directions:
+
+1. **Mosaic the enrolled frames** into a larger composite template. That may
+   clear NBIS/bozorth3's 10-minutiae floor on the template side and let the
+   standard libfprint matcher do the work.
+2. **A real minutiae + orientation-field matcher** (SourceAFIS-style).
+
+Contributions very welcome — the matcher is deliberately isolated in
+`egis_match.c` behind a two-function interface (`em_frame_compute` /
+`em_match`), so it can be replaced without touching the USB or state-machine
+code.
+
+*(An earlier revision of this file quoted "genuine 0.47-0.89, impostors
+0.11-0.21". Those came from an unlabeled ad-hoc session where presses were
+driven by a timer rather than confirmed per press; the table above supersedes
+them.)*
+
+## Evaluation harness
+
+Trustworthy numbers need labeled presses. `test_matching.py` in the repo root
+prompts for each press by name ("Press 3/8 — RIGHT INDEX"), waits for you,
+reports captured/rejected with coverage, forces a lift between presses, and
+saves every frame under a label matching the prompt, then prints the full
+score table. Run it interactively in a terminal — do not drive presses from a
+timer or a background process, which is how the superseded numbers above went
+wrong.
 
 ## Building
 

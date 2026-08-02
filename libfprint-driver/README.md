@@ -6,13 +6,17 @@ device init, finger detection, capture, 8-stage enrollment, and verification
 all run through the standard libfprint API (`examples/enroll`,
 `examples/verify`).
 
-**Status: the protocol and capture side work; matching does not yet.** The
-driver reliably produces clean fingerprint images and completes enrollment and
-verification flows, but the correlation matcher's genuine and impostor scores
-overlap, so it cannot yet be trusted to tell fingers apart — see "Matching
-does not currently work reliably" below for the measurements and for what
-needs to change. Use it as a working capture/protocol foundation and a
-matching problem to attack, not as a drop-in authentication device.
+**Status: working, including matching.** Over two labelled test sessions
+(coverage-guided enrolment; 10 genuine and 16 impostor probes from two other
+fingers) the matcher accepts no impostor press and rejects 10% of genuine
+presses at its operating threshold — see "Measured performance" below, along
+with an honest account of how small that sample is.
+
+Two things were needed to get there, and both are worth reading if you are
+building on this sensor: enrolment has to **cover different parts of the
+fingertip**, and the sensor intermittently **serves a stale frame** that must
+be detected and discarded (see "Ghost frames" — it silently produced false
+accepts before we caught it).
 
 The protocol layer is built directly on this project's findings (INIT/REPEAT
 sequences, variance-based finger detection, the gain register) plus the vendor
@@ -63,54 +67,86 @@ structure ("skeletons") on the host. This driver does the same: it is a plain
   stored calibration), masks to coherent-ridge blocks (structure-tensor
   coherence, from the vendor's `qty` metric), and scores translation-searched
   normalized cross-correlation against each enrolled frame, best-of-8.
+- **Every matching frame is checked against its own detect frame** to reject
+  stale "ghost" frames (see below).
 
-## Matching does not currently work reliably — read this before trusting it
+## Measured performance
 
-**The correlation matcher does not separate genuine presses from impostors on
-this sensor.** This is measured, not suspected, and it is the honest headline:
-the capture side of this driver is solid, the matching side is an open problem.
+Every press below was explicitly prompted and labelled at press time (see
+"Evaluation harness"), and every dataset was scanned for ghost frames before
+scoring. Two sessions, each with 8 coverage-guided enrolment templates for a
+right index finger, then genuine probes plus impostor probes from a right
+thumb and a left index finger, scored best-of-8:
 
-Numbers from a controlled run (one unit, one user, every press explicitly
-prompted and labeled at press time — see "Evaluation harness" below): 8
-enrolled right-index templates, then 5 probes each of right index (genuine),
-right thumb, and left index (impostors), scored best-of-8:
-
-| probe | scores |
+| | scores |
 |---|---|
-| genuine (right index) | 0.350, 0.392, 0.451, 0.798, 0.981 |
-| impostor (right thumb) | 0.275, 0.295, 0.338, 0.353, 0.364 |
-| impostor (left index) | 0.272, 0.281, 0.374, 0.447, 0.456 |
+| genuine (10 probes) | 0.421, 0.574, 0.672, 0.691, 0.704, 0.712, 0.803, 0.837, 0.849, 0.923 |
+| impostor (16 probes) | 0.244 … 0.528 (max) |
 
-The worst genuine press (0.350) scores **below** the best impostor (0.456), so
-no threshold classifies this set correctly — the margin is -0.106. Genuine
-scores also swing enormously with placement (0.35 to 0.98 on the same finger).
+At the shipped threshold of **0.53: 0% false accept, 10% false reject.** The
+single false reject is the 0.421 press, which landed away from the enrolled
+area; a retry fixes it. One of the two sessions separates completely (every
+genuine above every impostor).
 
-Why: on a 70x57 patch almost all ridges are near-parallel, so global
-correlation largely measures ridge *orientation and spacing*, which any two
-fingertips share when pressed at a similar angle. The identity information —
-ridge endings and bifurcations, and how they're arranged — is exactly what
-correlation discards.
+**How small this sample is:** one sensor, one person, 26 probes, two impostor
+fingers. That is enough to show the driver works and nowhere near enough to
+quote a FAR/FRR spec. The margin is also thin — the worst genuine press
+(0.421) sits below the best impostor (0.528), and only the coverage of
+enrolment keeps genuine presses in the 0.6-0.9 band. Independent data from
+other units and other fingers is very welcome.
 
-Approaches tried that do **not** fix it (don't spend time re-deriving these):
-multi-template consensus, peak-to-sidelobe ratio of the correlation surface,
-local-tile agreement, and top-3 score fusion. All produce overlapping genuine
-and impostor distributions. **The feature has to change, not the score
-fusion.** The two promising directions:
+### Coverage is what drives the false-reject rate
 
-1. **Mosaic the enrolled frames** into a larger composite template. That may
-   clear NBIS/bozorth3's 10-minutiae floor on the template side and let the
-   standard libfprint matcher do the work.
-2. **A real minutiae + orientation-field matcher** (SourceAFIS-style).
+Correlation on a patch this small separates **decisively when the probe
+overlaps an enrolled region** (0.6-0.9) and **not at all when it doesn't**
+(0.35-0.45, indistinguishable from an impostor). So the fix for false
+rejects is not a cleverer score, it is enrolling more of the fingertip.
 
-Contributions very welcome — the matcher is deliberately isolated in
-`egis_match.c` behind a two-function interface (`em_frame_compute` /
-`em_match`), so it can be replaced without touching the USB or state-machine
-code.
+Enrolling eight presses at the same comfortable position covers about twice
+one frame's area and gave a 60% false-reject rate. Prompting for eight
+*distinct* positions — centred, toward the tip, toward the knuckle, left,
+right, rolled left, rolled right — dropped that to 10% with no loss of
+security. This is the same "adjust your grip" phase phone sensors use, and
+on a sensor this small it is not optional.
 
-*(An earlier revision of this file quoted "genuine 0.47-0.89, impostors
-0.11-0.21". Those came from an unlabeled ad-hoc session where presses were
-driven by a timer rather than confirmed per press; the table above supersedes
-them.)*
+An earlier revision of this file reported that genuine and impostor scores
+overlapped and concluded that correlation could not carry identity. That was
+wrong twice over: the threshold was far too low (0.28, which accepts 80% of
+impostor presses), and the datasets contained ghost frames (below) that
+manufactured both a phantom "genuine" match and two phantom false accepts.
+
+## Ghost frames — a silent false-accept vector
+
+**This sensor intermittently returns a stale frame: a ghost of an earlier
+press, carrying fresh sensor noise.** Because the noise differs, the frame is
+not byte-identical to the original and checksums will not catch it. Against
+the earlier print it correlates ~0.98.
+
+How it showed up: in two separate datasets, a frame captured while a
+completely different finger was on the sensor turned out to correlate 0.98
+with the *first* frame captured that session. In one dataset that produced a
+fake "genuine" match; in another it produced two false accepts, scoring 0.974
+where real impostor presses score below 0.53. Left undetected in a driver,
+this is an authentication bypass: press any finger, occasionally get in.
+
+The re-arm (REPEAT) sequence does **not** prevent it, so it is not simply a
+stale USB buffer; it looks like frame retention on the sensor side, in the
+same family as this sensor's other known latching behaviour.
+
+**The guard used here:** the driver captures the finger-detect frame at gain 0
+and the matching frame at gain 6, from the same press. Those two frames must
+agree — the same finger in the same position — so it correlates them and
+requires a score of at least 0.45. A ghost of a different press shows a
+different finger and fails badly. On failure the gain-6 frame is re-taken (up
+to twice) and then the driver falls back to the gain-0 frame, which is at
+least known to be the current press. See state `C_HQ_VERIFY` in
+`egis0576.c`.
+
+**If you collect data from this sensor, scan for ghosts before trusting it:**
+compare every pair of frames carrying *different* labels and flag any raw
+correlation above 0.95. Two presses of genuinely different fingers cannot do
+that. `test_matching.py` captures labelled data suitable for exactly this
+check.
 
 ## Evaluation harness
 
@@ -118,7 +154,9 @@ Trustworthy numbers need labeled presses. `test_matching.py` in the repo root
 prompts for each press by name ("Press 3/8 — RIGHT INDEX"), waits for you,
 reports captured/rejected with coverage, forces a lift between presses, and
 saves every frame under a label matching the prompt, then prints the full
-score table. Run it interactively in a terminal — do not drive presses from a
+score table, and discards ghost frames as it goes. It prompts a distinct
+finger position for each enrolment press, which is what keeps the false-reject
+rate down. Run it interactively in a terminal — do not drive presses from a
 timer or a background process, which is how the superseded numbers above went
 wrong.
 

@@ -34,8 +34,24 @@ VAR_THRESHOLD = 12.0
 SETTLE_FRAMES = 3
 PRESS_FRAMES_MAX = 20
 MIN_COVERAGE = 0.55
-MATCH_THRESHOLD = 0.28
+MATCH_THRESHOLD = 0.53
+GHOST_THRESHOLD = 0.45   # gain-6 frame must agree with its gain-0 settle frame
 GAIN_HI = 6
+
+# Enrolment must cover *different parts of the fingertip*, not the same spot
+# eight times: a probe only matches if it lands on enrolled territory, so
+# coverage is what drives the false-reject rate. Same idea as the "adjust
+# your grip" phase of phone fingerprint enrolment.
+ENROLL_POSITIONS = [
+    "flat and centered — your normal unlock press",
+    "slide your finger UP, so the sensor sees nearer the TIP",
+    "slide your finger DOWN, so the sensor sees nearer the KNUCKLE",
+    "shift LEFT — sensor toward the left edge of your fingerprint",
+    "shift RIGHT — sensor toward the right edge",
+    "ROLL your finger onto its LEFT side",
+    "ROLL your finger onto its RIGHT side",
+    "flat and centered again, slightly different angle",
+]
 
 BOLD = "\033[1m"
 GREEN = "\033[32m"
@@ -85,11 +101,20 @@ def capture_press(dev):
             misses += 1
         if misses >= SETTLE_FRAMES or frames >= PRESS_FRAMES_MAX:
             break
-    # high-quality frame at gain 6 (fetch_frame re-arms internally)
-    set_gain(dev, GAIN_HI)
-    hq = fetch_frame(dev)
-    set_gain(dev, 0)
-    return hq if hq is not None else best
+    # High-quality frame at gain 6 (fetch_frame re-arms internally).
+    # The sensor sometimes serves a ghost of an earlier press, so require the
+    # gain-6 frame to agree with the gain-0 frame we just settled on.
+    for _ in range(3):
+        set_gain(dev, GAIN_HI)
+        hq = fetch_frame(dev)
+        set_gain(dev, 0)
+        if hq is None:
+            continue
+        agree = CM.ncc_masked(hq, best)
+        if agree >= GHOST_THRESHOLD:
+            return hq
+        print(f"    {YELLOW}stale frame discarded{RESET} (agreement {agree:.2f}) — retaking")
+    return best
 
 
 def prompt_press(dev, k, n, finger, hint):
@@ -109,13 +134,14 @@ def prompt_press(dev, k, n, finger, hint):
         wait_for_lift(dev)
 
 
-def run_phase(dev, outdir, tag, finger, count, hint):
+def run_phase(dev, outdir, tag, finger, count, hint, positions=None):
     print(f"\n{BOLD}{'='*62}\nPHASE: {tag.upper()} — {count} presses with your"
           f" {finger.upper()}\n{'='*62}{RESET}")
     input(f"Have your {BOLD}{finger.upper()}{RESET} ready, then hit ENTER to start...")
     frames = []
     for k in range(count):
-        f = prompt_press(dev, k + 1, count, finger, hint)
+        this_hint = positions[k] if positions else hint
+        f = prompt_press(dev, k + 1, count, finger, this_hint)
         path = os.path.join(outdir, f"{tag}_{k:02d}.bin")
         with open(path, "wb") as fh:
             fh.write(f)
@@ -142,9 +168,11 @@ def main():
     os.makedirs(outdir, exist_ok=True)
     print(f"Frames will be saved to {outdir}/ (local only — biometric data).")
 
-    enrolled = run_phase(dev, outdir, "enroll", "right index", 8,
-                         "shift position slightly between presses — cover "
-                         "different parts of the fingertip")
+    print(f"\n{YELLOW}Enrolment covers different parts of the fingertip — follow\n"
+          f"the position for each press; that coverage is what makes later\n"
+          f"verification succeed.{RESET}")
+    enrolled = run_phase(dev, outdir, "enroll", "right index",
+                         len(ENROLL_POSITIONS), "", positions=ENROLL_POSITIONS)
     genuine = run_phase(dev, outdir, "genuine", "right index", 5,
                         "natural placement, as you would to unlock")
     impostor_t = run_phase(dev, outdir, "impostor-thumb", "right thumb", 5,

@@ -57,9 +57,14 @@ structure ("skeletons") on the host. This driver does the same: it is a plain
 - **Detection** runs at the sensor's default gain: poll frames, variance > 12
   means finger (this project's proven test), then hold until the press
   *settles* (peak variance) so a first-contact partial print is never used.
-- **The match frame** is captured at gain 6 (register 0x12) — ~2.4x the ridge
-  SNR of the default. The sensor must be re-armed (REPEAT sequence) between
-  the gain write and the image request, or it returns a blank frame.
+- **Everything runs at the default gain.** An earlier revision re-captured
+  the matching frame at gain 6 (register 0x12) for ~2.4x ridge SNR. Measured
+  on hardware, a gain-6 frame and the gain-0 frame of the same press agree at
+  **0.99** once enhanced and masked, so the extra gain gives the matcher
+  nothing, while clipping 12-23% of pixels to black and adding ~300ms per
+  capture. (If you do use a gain change: the sensor must be re-armed with the
+  REPEAT sequence between the register write and the image request, or it
+  returns a blank frame.)
 - **Enrollment** collects 8 coverage-gated presses (coherence mask must cover
   >= 55% of the frame) and stores the raw frames in the print's `fpi-data`.
 - **Verification** enhances the probe (3x3 box mean minus 9x9 box mean — the
@@ -133,14 +138,24 @@ The re-arm (REPEAT) sequence does **not** prevent it, so it is not simply a
 stale USB buffer; it looks like frame retention on the sensor side, in the
 same family as this sensor's other known latching behaviour.
 
-**The guard used here:** the driver captures the finger-detect frame at gain 0
-and the matching frame at gain 6, from the same press. Those two frames must
-agree — the same finger in the same position — so it correlates them and
-requires a score of at least 0.45. A ghost of a different press shows a
-different finger and fails badly. On failure the gain-6 frame is re-taken (up
-to twice) and then the driver falls back to the gain-0 frame, which is at
-least known to be the current press. See state `C_HQ_VERIFY` in
-`egis0576.c`.
+**The guard used here:** the frame selected for matching must agree with
+another frame captured from the same press, at the same gain. Two frames of
+one held press agree at **0.997-0.998** (measured over five presses), so the
+threshold sits at 0.85 — wide margin for a normal press, while a ghost of a
+different press shows a different finger in a different position and falls
+far below it. A press that fails the check is discarded entirely and the
+driver waits for a fresh one. See `accept_press()` in `egis0576.c`.
+
+**A cautionary note on how this guard was first written**, since it is an
+easy trap: the original version compared the gain-0 detect frame against a
+gain-6 match frame with a threshold picked by guesswork. On hardware it
+rejected *every* frame (agreement 0.115-0.216) and silently fell back, so the
+guard protected nothing while appearing to be present. The cause was latency,
+not gain — the second capture landed ~500ms after the first, by which time a
+quick press was over and the sensor was imaging nothing. **Calibrate a guard
+threshold against measured same-press agreement before trusting it**;
+`calibrate_guard.py` in the repo root does exactly that, and prints what a
+legitimate capture actually looks like.
 
 **If you collect data from this sensor, scan for ghosts before trusting it:**
 compare every pair of frames carrying *different* labels and flag any raw
@@ -206,6 +221,59 @@ cc -O2 -DEGIS_MATCH_MAIN egis_match.c -o egis_match -lm
 On a 5-finger x 8-press dataset this reproduces the Python prototype exactly:
 pairwise d-prime 1.14; multi-template (5 enrolled) 13.3% FRR / 11.7% FAR at
 the best operating point.
+
+## Using it for login (fprintd + PAM)
+
+Verified on Linux Mint 22.2 with the distribution's fprintd 1.94.3 and
+libpam-fprintd, against this driver built from libfprint master. The build
+here is ABI-compatible with the packaged fprintd: check with
+`nm -D --undefined-only /usr/libexec/fprintd` against the exported symbols of
+the built library (strip the `@VERSION` suffixes before comparing, or every
+symbol looks missing).
+
+Install to `/usr/local`, which precedes `/usr/lib` in the linker search path,
+so fprintd picks up this build without touching any packaged file:
+
+```sh
+meson setup build --prefix=/usr/local --libdir=lib/x86_64-linux-gnu \
+    -Ddrivers=egis0576 -Ddoc=false -Dintrospection=false -Dgtk-examples=false
+ninja -C build
+sudo meson install -C build
+sudo ldconfig
+ldd /usr/libexec/fprintd | grep libfprint      # must show /usr/local/...
+```
+
+To undo completely:
+`sudo rm -f /usr/local/lib/x86_64-linux-gnu/libfprint-2.so* && sudo ldconfig`
+
+Then enroll and test. fprintd is D-Bus activated, so stopping it is enough to
+make the next command pick up a newly installed library:
+
+```sh
+sudo systemctl stop fprintd
+fprintd-enroll        # vary finger position across the 8 presses -- see below
+fprintd-verify
+```
+
+**`fprintd-enroll` gives no positional guidance**, so move your finger
+deliberately between presses (centred, toward the tip, toward the knuckle,
+left, right, rolled left, rolled right, centred). Enrolling eight presses at
+one position is the difference between a 10% and a 60% false-reject rate.
+
+For login and `sudo`, enable the PAM profile:
+
+```sh
+sudo pam-auth-update --enable fprintd
+```
+
+That places `pam_fprintd` ahead of `pam_unix` with `success=end`, leaving the
+password path intact as a fallback — which matters, because a press that
+lands off the enrolled area is rejected and you will want to type a password
+rather than fight the sensor. Keep a root shell open while you test, and
+verify with `sudo -k && sudo true` in a fresh terminal before logging out.
+
+Lock-screen unlock works through the same PAM stack with no extra
+configuration.
 
 ## Hardware warnings
 

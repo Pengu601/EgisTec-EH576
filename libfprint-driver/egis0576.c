@@ -30,13 +30,17 @@
 static const guint8 poll_cmd[] = { 0x45, 0x47, 0x49, 0x53, 0x60, 0x00, 0x00 };
 static const guint8 img_req[]  = { 0x45, 0x47, 0x49, 0x53, 0x64, 0x0f, 0x96 };
 
-/* Register 0x12 is the sensor gain (0..15; power-on default 0). Finger
- * detection runs at the low default, but the frame used for matching is
- * captured at higher gain: ridge signal-to-noise there is ~2.4x better,
- * which the correlation matcher needs to see ridge detail rather than just
- * coarse ridge flow. */
-static const guint8 gain_hi_cmd[] = { 0x45, 0x47, 0x49, 0x53, 0x61, 0x12, 0x06 };
-static const guint8 gain_lo_cmd[] = { 0x45, 0x47, 0x49, 0x53, 0x61, 0x12, 0x00 };
+/* Everything runs at the sensor's default gain (register 0x12 = 0).
+ *
+ * An earlier revision re-captured the matching frame at gain 6 for ~2.4x
+ * ridge SNR. Measured on hardware, a gain-6 frame and the gain-0 frame of
+ * the same press agree at 0.99 once enhanced and masked -- i.e. gain adds
+ * nothing the matcher can use -- while clipping 12-23% of pixels to black
+ * and adding ~300ms to every capture. Worse, that latency routinely pushed
+ * the second capture past the end of a quick press, so the frame it
+ * returned showed an empty sensor. Single-gain capture is faster, simpler
+ * and keeps enrolment and verification on identical footing.
+ */
 
 #define EGIS0576_POLL_DELAY 50
 
@@ -67,11 +71,14 @@ static const guint8 gain_lo_cmd[] = { 0x45, 0x47, 0x49, 0x53, 0x61, 0x12, 0x00 }
 /* The sensor sometimes serves a stale frame -- a ghost of an earlier press,
  * carrying fresh noise, so it cannot be caught by comparing bytes. Seen in
  * captured datasets as an "impostor" frame correlating 0.98 with the first
- * enrolled frame, which would be a silent false accept. The guard: the
- * gain-6 frame must agree with the gain-0 frame just settled from the same
- * press; a ghost of a different press shows a different finger and fails. */
-#define EGIS0576_GHOST_THRESHOLD 0.45
-#define EGIS0576_HQ_RETRIES 2
+ * enrolled frame, which would be a silent false accept.
+ *
+ * The guard: the frame chosen for matching must agree with another frame
+ * from the same press. Two frames of one held press agree at 0.997-0.998
+ * (measured over five presses), so 0.85 leaves a wide margin while a ghost
+ * of a different press -- a different finger in a different position --
+ * falls far below it. */
+#define EGIS0576_GHOST_THRESHOLD 0.85
 
 /* fpi-data print format: version tag + concatenated raw template frames */
 #define EGIS0576_PRINT_VERSION 1
@@ -90,8 +97,7 @@ struct _FpDeviceEgis0576
    * lands; we keep the highest-variance frame and accept once the score
    * stops improving, so a first-contact partial print is never used. */
   guint8       *best_frame;  /* highest-variance frame seen this press     */
-  guint8       *hq_frame;    /* gain-6 frame, pending the ghost check      */
-  int           hq_retry;    /* re-takes left for a rejected gain-6 frame  */
+  guint8       *prev_frame;  /* previous finger-down frame, for ghost check */
   double        best_var;    /* its variance (0 = no finger seen yet)      */
   int           settle_num;  /* consecutive frames with no improvement     */
   int           press_num;   /* total frames since finger first detected   */
@@ -260,15 +266,7 @@ enum capture_states {
   C_POLL,        /* send poll command                            */
   C_IMG_REQ,     /* send image request                           */
   C_IMG_READ,    /* read the 3990-byte frame                     */
-  C_CHECK,       /* variance test / settle / lift-wait           */
-  C_GAIN_HI,     /* press settled: raise gain for the match frame */
-  C_HQ_ARM_SEND, /* re-arm: an image request without a fresh      */
-  C_HQ_ARM_LOOP, /* repeat-sequence prelude returns a blank frame */
-  C_HQ_REQ,      /* request the high-gain frame                  */
-  C_HQ_READ,     /* read it into hq_frame                        */
-  C_GAIN_LO,     /* restore default gain                         */
-  C_HQ_VERIFY,   /* reject a stale/ghost gain-6 frame            */
-  C_AFTER_HQ,    /* complete, or wait for lift first             */
+  C_CHECK,       /* variance test / settle / ghost check / lift  */
   C_NUM_STATES,
 };
 
@@ -286,20 +284,47 @@ img_read_cb (FpiUsbTransfer *transfer, FpDevice *dev, gpointer user_data, GError
   fpi_ssm_next_state (transfer->ssm);
 }
 
-/* The high-gain frame lands in a staging buffer; C_HQ_VERIFY promotes it
- * to best_frame only once it is confirmed to show the current press. */
+/* Accept the settled frame for this press, unless it disagrees with the rest
+ * of the press -- see EGIS0576_GHOST_THRESHOLD. On rejection the press is
+ * discarded and the capture waits for a fresh one. */
 static void
-hq_read_cb (FpiUsbTransfer *transfer, FpDevice *dev, gpointer user_data, GError *error)
+accept_press (FpiSsm *ssm, FpDevice *dev)
 {
   FpDeviceEgis0576 *self = FPI_DEVICE_EGIS0576 (dev);
 
-  if (error)
+  if (self->press_num >= 2)
     {
-      fpi_ssm_mark_failed (transfer->ssm, error);
-      return;
+      static EmFrame chosen, other;
+      double agree;
+
+      em_frame_compute (self->best_frame, &chosen);
+      em_frame_compute (self->prev_frame, &other);
+      agree = em_match (&chosen, &other);
+      fp_dbg ("frame agrees with the rest of the press at %.3f", agree);
+
+      if (agree < EGIS0576_GHOST_THRESHOLD)
+        {
+          fp_warn ("discarding inconsistent frame (agreement %.3f) -- "
+                   "possible stale capture; waiting for a fresh press", agree);
+          self->best_var = 0;
+          self->settle_num = 0;
+          self->press_num = 0;
+          self->waiting_clear = TRUE;
+          fpi_ssm_jump_to_state (ssm, C_WAIT);
+          return;
+        }
     }
-  memcpy (self->hq_frame, transfer->buffer, EGIS0576_IMGSIZE);
-  fpi_ssm_next_state (transfer->ssm);
+
+  if (self->wait_off)
+    {
+      self->waiting_off = TRUE;
+      fpi_ssm_jump_to_state (ssm, C_WAIT);
+    }
+  else
+    {
+      fpi_device_report_finger_status (dev, FP_FINGER_STATUS_NONE);
+      fpi_ssm_mark_completed (ssm);
+    }
 }
 
 static void
@@ -387,10 +412,8 @@ capture_ssm_run (FpiSsm *ssm, FpDevice *dev)
           {
             if (self->best_var > 0)
               {
-                /* finger lifted mid-settle: try the high-gain capture anyway;
-                 * if the finger is really gone the frame fails the coverage
-                 * gate downstream and the stage retries */
-                fpi_ssm_jump_to_state (ssm, C_GAIN_HI);
+                /* finger lifted mid-settle: accept the best frame we have */
+                accept_press (ssm, dev);
               }
             else
               {
@@ -402,6 +425,9 @@ capture_ssm_run (FpiSsm *ssm, FpDevice *dev)
         if (self->best_var == 0)
           fpi_device_report_finger_status (dev, FP_FINGER_STATUS_PRESENT);
 
+        /* remember the previous finger-down frame for the ghost check */
+        if (self->press_num >= 1)
+          memcpy (self->prev_frame, self->frame, EGIS0576_IMGSIZE);
         self->press_num++;
         if (var > self->best_var)
           {
@@ -416,104 +442,12 @@ capture_ssm_run (FpiSsm *ssm, FpDevice *dev)
 
         if (self->settle_num >= EGIS0576_SETTLE_FRAMES ||
             self->press_num >= EGIS0576_PRESS_FRAMES_MAX)
-          fpi_ssm_next_state (ssm);
+          accept_press (ssm, dev);
         else
           fpi_ssm_jump_to_state (ssm, C_WAIT);
       }
       break;
 
-    case C_GAIN_HI:
-      self->arm_num = 0;
-      send_cmd (ssm, dev, gain_hi_cmd, sizeof (gain_hi_cmd));
-      break;
-
-    case C_HQ_ARM_SEND:
-      send_cmd (ssm, dev, repeat_pkts[self->arm_num].data,
-                repeat_pkts[self->arm_num].len);
-      break;
-
-    case C_HQ_ARM_LOOP:
-      self->arm_num += 1;
-      if (self->arm_num < (int) EGIS0576_REPEAT_TOTAL)
-        fpi_ssm_jump_to_state (ssm, C_HQ_ARM_SEND);
-      else
-        fpi_ssm_next_state (ssm);
-      break;
-
-    case C_HQ_REQ:
-      {
-        FpiUsbTransfer *tx = fpi_usb_transfer_new (dev);
-        tx->ssm = ssm;
-        tx->short_is_error = TRUE;
-        fpi_usb_transfer_fill_bulk_full (tx, EGIS0576_EPOUT,
-                                         (guint8 *) img_req, sizeof (img_req), NULL);
-        fpi_usb_transfer_submit (tx, EGIS0576_TIMEOUT,
-                                 fpi_device_get_cancellable (dev),
-                                 fpi_ssm_usb_transfer_cb, NULL);
-      }
-      break;
-
-    case C_HQ_READ:
-      {
-        FpiUsbTransfer *rx = fpi_usb_transfer_new (dev);
-        rx->ssm = ssm;
-        fpi_usb_transfer_fill_bulk (rx, EGIS0576_EPIN, EGIS0576_IMGSIZE);
-        fpi_usb_transfer_submit (rx, EGIS0576_TIMEOUT,
-                                 fpi_device_get_cancellable (dev),
-                                 hq_read_cb, NULL);
-      }
-      break;
-
-    case C_GAIN_LO:
-      send_cmd (ssm, dev, gain_lo_cmd, sizeof (gain_lo_cmd));
-      break;
-
-    case C_HQ_VERIFY:
-      {
-        static EmFrame hq, settled;
-        double agree;
-
-        em_frame_compute (self->hq_frame, &hq);
-        em_frame_compute (self->best_frame, &settled);
-        agree = em_match (&hq, &settled);
-        fp_dbg ("gain-6 frame agrees with settled frame at %.3f", agree);
-
-        if (agree >= EGIS0576_GHOST_THRESHOLD)
-          {
-            memcpy (self->best_frame, self->hq_frame, EGIS0576_IMGSIZE);
-            fpi_ssm_next_state (ssm);
-            break;
-          }
-
-        /* Stale frame: re-take it, and if it keeps coming back stale fall
-         * through with the gain-0 frame, which is at least this press. */
-        if (self->hq_retry > 0)
-          {
-            self->hq_retry--;
-            fp_warn ("discarding stale gain-6 frame (agreement %.3f), retrying",
-                     agree);
-            fpi_ssm_jump_to_state (ssm, C_GAIN_HI);
-          }
-        else
-          {
-            fp_warn ("gain-6 frame still stale; using the gain-0 frame");
-            fpi_ssm_next_state (ssm);
-          }
-      }
-      break;
-
-    case C_AFTER_HQ:
-      if (self->wait_off)
-        {
-          self->waiting_off = TRUE;
-          fpi_ssm_jump_to_state (ssm, C_WAIT);
-        }
-      else
-        {
-          fpi_device_report_finger_status (dev, FP_FINGER_STATUS_NONE);
-          fpi_ssm_mark_completed (ssm);
-        }
-      break;
     }
 }
 
@@ -528,7 +462,6 @@ capture_ssm_new (FpDevice *dev, gboolean wait_off)
   self->waiting_off = FALSE;
   self->wait_off = wait_off;
   self->waiting_clear = TRUE;
-  self->hq_retry = EGIS0576_HQ_RETRIES;
   fpi_device_report_finger_status (dev, FP_FINGER_STATUS_NEEDED);
   return fpi_ssm_new (dev, capture_ssm_run, C_NUM_STATES);
 }
@@ -798,7 +731,7 @@ egis0576_open (FpDevice *dev)
     }
   self->frame = g_malloc0 (EGIS0576_IMGSIZE);
   self->best_frame = g_malloc0 (EGIS0576_IMGSIZE);
-  self->hq_frame = g_malloc0 (EGIS0576_IMGSIZE);
+  self->prev_frame = g_malloc0 (EGIS0576_IMGSIZE);
   fpi_device_open_complete (dev, NULL);
 }
 
@@ -810,7 +743,7 @@ egis0576_close (FpDevice *dev)
 
   g_clear_pointer (&self->frame, g_free);
   g_clear_pointer (&self->best_frame, g_free);
-  g_clear_pointer (&self->hq_frame, g_free);
+  g_clear_pointer (&self->prev_frame, g_free);
   g_usb_device_release_interface (fpi_device_get_usb_device (dev),
                                   EGIS0576_INTF, 0, &error);
   fpi_device_close_complete (dev, error);

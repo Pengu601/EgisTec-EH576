@@ -28,7 +28,8 @@ preprocessing reverse-engineered from the Windows driver.
 |---|---|
 | `egis0576.c` | The driver: USB protocol, init/capture state machines, enrollment, identification |
 | `egis0576.h` | Init/repeat packet tables and device constants |
-| `egis_match.c` | Correlation matcher (included by `egis0576.c`; also builds standalone as an offline eval tool) |
+| `egis_match.c` | Correlation matcher; also builds standalone as an offline eval tool |
+| `egis_match.h` | Matcher interface (`em_frame_compute` / `em_match`) — replace the matcher without touching the USB or state-machine code |
 
 ## Why this is not an FpImageDevice driver
 
@@ -179,15 +180,21 @@ wrong.
 
 Tested against libfprint master (1.94.x), Meson >= 1.0.
 
+The quickest route is `install.sh` in the repo root, which does all of the
+below (and `./install.sh --uninstall` reverses it). Manually:
+
 ```sh
 git clone https://gitlab.freedesktop.org/libfprint/libfprint.git
-cp egis0576.c egis0576.h egis_match.c libfprint/libfprint/drivers/
+cp egis0576.c egis0576.h egis_match.c egis_match.h libfprint/libfprint/drivers/
 
 # register the driver (2 places):
 # 1. top-level meson.build, in the drivers dict next to 'egis0570':
 #        'egis0576': {},
 # 2. libfprint/meson.build, in driver_sources next to egis0570:
-#        'egis0576' : files('drivers/egis0576.c'),
+#        'egis0576' : files(
+#            'drivers/egis0576.c',
+#            'drivers/egis_match.c',
+#        ),
 
 cd libfprint
 meson setup build -Ddrivers=egis0576 -Ddoc=false -Dintrospection=false -Dgtk-examples=false

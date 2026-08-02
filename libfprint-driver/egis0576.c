@@ -24,7 +24,7 @@
 
 #include "egis0576.h"
 #include "drivers_api.h"
-#include "egis_match.c"
+#include "egis_match.h"
 
 /* Poll and image-request packets used in the capture loop. */
 static const guint8 poll_cmd[] = { 0x45, 0x47, 0x49, 0x53, 0x60, 0x00, 0x00 };

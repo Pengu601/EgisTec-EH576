@@ -1,4 +1,24 @@
-/* egis_match.c - correlation matcher for the EgisTec EH576, C port of the
+/*
+ * Correlation matcher for the EgisTec EH576.
+ *
+ * Copyright (C) 2026 Thaddeus Stepanovich
+ *
+ * This library is free software; you can redistribute it and/or modify it
+ * under the terms of the GNU Lesser General Public License as published by the
+ * Free Software Foundation; either version 2.1 of the License, or (at your
+ * option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Lesser General Public License
+ * for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License
+ * along with this library; if not, write to the Free Software Foundation,
+ * Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
+
+/* C port of the
  * proven Python recipe (corr_match.py / minutiae.py):
  *
  *   enhance   = box1 then box4 high-pass (+128), edge-replicated windows
@@ -15,9 +35,8 @@
 #include <stdint.h>
 #include <string.h>
 
-#define EM_W 70
-#define EM_H 57
-#define EM_N (EM_W * EM_H)
+#include "egis_match.h"
+
 #define EM_BLOCK 16
 #define EM_BH (EM_H / EM_BLOCK) /* 3 */
 #define EM_BW (EM_W / EM_BLOCK) /* 4 */
@@ -145,15 +164,7 @@ em_standardize (double *img)
     img[i] /= sd;
 }
 
-/* Precomputed per-frame features, the enrolment template unit. */
-typedef struct
-{
-  double  img[EM_N];   /* enhanced + standardized      */
-  uint8_t mask[EM_N];  /* coherent-ridge pixel mask    */
-  double  coverage;    /* coherent fraction, 0..1      */
-} EmFrame;
-
-static void
+void
 em_frame_compute (const uint8_t *raw, EmFrame *f)
 {
   em_enhance (raw, f->img);
@@ -162,7 +173,7 @@ em_frame_compute (const uint8_t *raw, EmFrame *f)
 }
 
 /* Masked NCC with translation search; -1 if never enough overlap. */
-static double
+double
 em_match (const EmFrame *a, const EmFrame *b)
 {
   double best = -1.0;

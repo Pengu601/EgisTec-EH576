@@ -1,5 +1,9 @@
 # libfprint driver for the EgisTec EH576 (1c7a:0576)
 
+> **Just want your fingerprint reader to work?** This directory is the
+> technical write-up. For a one-command installer and login setup, see
+> **https://github.com/tsteppy/egistec-eh576-libfprint**
+
 A **libfprint driver** for the EH576, written in C against current libfprint
 master and validated end-to-end on real hardware (Lenovo Yoga 7 16IRL8):
 device init, finger detection, capture, 8-stage enrollment, and verification

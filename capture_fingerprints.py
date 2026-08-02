@@ -47,13 +47,28 @@ def execute_cmd(dev, hex_cmd, read_len=64, timeout=1000):
     except Exception:
         return b"" #[cite: 5]
 
-#calculate variance to see if finger is present on sensor
+# Detection ported from the Windows driver's own finger_detect routine.
+# See egis_detect.py for the reversing notes; set USE_VENDOR_DETECT = False to
+# fall back to the original variance threshold.
+USE_VENDOR_DETECT = True
+try:
+    import egis_detect
+except ImportError:
+    egis_detect = None
+
+#check whether a finger is present on the sensor
 def is_finger_present(image_bytes):
-    
+
     if len(image_bytes) < IMG_SIZE: #[cite: 5]
         return False #[cite: 5]
-    
-    # slightly higher threshold (12.0) just to be safe against noise
+
+    # The vendor scores ridge periodicity rather than raw contrast, so smudges
+    # and baseline drift do not trigger it. Measured on this sensor: every
+    # no-finger frame scores 0 and every finger frame scores 12, out of 12.
+    if USE_VENDOR_DETECT and egis_detect is not None:
+        return egis_detect.is_finger_present(image_bytes)
+
+    # Fallback: original variance check, threshold 12.0 to stay clear of noise
     try:
         variance = statistics.pvariance(image_bytes) #[cite: 5]
         return variance > 12.0 #[cite: 5]

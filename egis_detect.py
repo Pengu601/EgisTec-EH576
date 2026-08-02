@@ -30,14 +30,28 @@ import math
 FRAME_W, FRAME_H = 70, 57
 FRAME_SIZE = FRAME_W * FRAME_H          # 3990
 
-# The driver floors the ridge threshold at 18 (rva 0x15b0b). That constant
-# assumes the vendor's capture gain; raw frames off this sensor span only
-# ~108..132, about a third of that range, so 18 is unreachable and every frame
-# scores 0. Measured against labelled captures, 5 separates cleanly with the
-# widest margin. If someone finds the missing gain step in the capture path,
-# VENDOR_RIDGE_FLOOR should start working directly and is the better fix.
+# The driver floors the ridge threshold at 18 (rva 0x15b0b). That constant is
+# only right for one sensor gain, so prefer calibrate_floor() over any of these.
+#
+# Sensor gain lives in register 0x12 (0..15) and offset in register 0x0f
+# (0..63), found in et5xx_fetch_dynamic_intensity (rva 0x8f90), where the
+# driver runs a closed loop: drop the gain when a frame's max saturates at
+# 0xff, raise it when the min bottoms out at 0. INIT_SEQUENCE leaves gain at
+# 0, its minimum, which is why raw frames span only ~108..132.
+#
+# Raising the gain does NOT make the vendor's 18 correct. Measured across
+# reg 0x12 = 0 and 6 (a ~13x change in noise), the usable floor tracks the
+# sensor's own noise, not the constant:
+#
+#   reg 0x12 = 0   noise sd  2.06   floor  5   ->  no finger 0, finger 12
+#   reg 0x12 = 6   noise sd 26.66   floor 67   ->  no finger 0, finger 9
+#
+# At gain 6 with floor 18, amplified noise clears the ridge test everywhere and
+# every frame scores a saturated 12. Hence: derive the floor from a no-finger
+# frame rather than hardcoding it.
 VENDOR_RIDGE_FLOOR = 18
-RIDGE_FLOOR = 5
+RIDGE_FLOOR = 5                 # correct for the default gain (reg 0x12 = 0)
+FLOOR_NOISE_MULTIPLIER = 2.5
 
 # level is 0..12; every no-finger frame measured 0 and every finger frame 12,
 # so the midpoint is a safe cutoff.
@@ -179,6 +193,24 @@ def level(buf, w=FRAME_W, h=FRAME_H, band=5, floor=RIDGE_FLOOR):
         for c in cols:
             score += _probe(buf, w, h, c, band, thresh, False)
     return score
+
+
+def calibrate_floor(baseline_frame, k=FLOOR_NOISE_MULTIPLIER):
+    """Derive the ridge floor from one no-finger frame.
+
+    The ridge test has to sit above the sensor's noise, and that noise scales
+    with whatever gain register 0x12 is set to. Taking the floor as k times the
+    baseline standard deviation tracks it automatically: it reproduces the 5
+    that was measured by hand at the default gain, and 67 at gain 6, both of
+    which separate cleanly.
+
+    Capture this once at startup with no finger on the sensor.
+    """
+    import statistics
+    if len(baseline_frame) < FRAME_SIZE:
+        return RIDGE_FLOOR
+    sd = math.sqrt(statistics.pvariance(baseline_frame[:FRAME_SIZE]))
+    return max(3, int(k * sd + 0.5))
 
 
 def is_finger_present(image_bytes, threshold=LEVEL_THRESHOLD):
